@@ -1,0 +1,37 @@
+app-id: io.github.xrishox.SteamIdentifier
+runtime: org.gnome.Platform
+runtime-version: '49'
+sdk: org.gnome.Sdk
+command: steam-identifier
+
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  - --share=network
+  # Steam libraries can live in native, Flatpak, Snap, home, or mounted disk paths.
+  # Access is read-only; bookmarks are stored in this app's sandbox config.
+  - --filesystem=host:ro
+
+modules:
+  - name: steam-identifier
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 packaging/flatpak/steam-identifier /app/bin/steam-identifier
+      - install -Dm644 steam_identifier.py /app/share/steam-identifier/steam_identifier.py
+      - mkdir -p /app/share/steam-identifier/steam_identifier
+      - install -Dm644 steam_identifier/*.py -t /app/share/steam-identifier/steam_identifier/
+      - install -Dm644 packaging/flatpak/io.github.xrishox.SteamIdentifier.desktop /app/share/applications/io.github.xrishox.SteamIdentifier.desktop
+      - install -Dm644 packaging/flatpak/io.github.xrishox.SteamIdentifier.metainfo.xml /app/share/metainfo/io.github.xrishox.SteamIdentifier.metainfo.xml
+      - install -Dm644 packaging/flatpak/io.github.xrishox.SteamIdentifier.svg /app/share/icons/hicolor/scalable/apps/io.github.xrishox.SteamIdentifier.svg
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - .git
+          - .flatpak-builder
+          - build-dir
+          - repo
+          - __pycache__
+          - "*.pyc"

@@ -1,0 +1,2 @@
+#!/bin/sh
+exec python3 /app/share/steam-identifier/steam_identifier.py "$@"

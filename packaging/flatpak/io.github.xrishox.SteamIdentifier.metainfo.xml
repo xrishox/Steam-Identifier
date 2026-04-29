@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.xrishox.SteamIdentifier</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Steam Identifier</name>
+  <summary>Identify Steam Proton compatdata prefixes</summary>
+  <description>
+    <p>Steam Identifier scans Steam library compatibility data folders and maps numeric prefix IDs to readable game and shortcut names.</p>
+    <p>It can open prefix folders and save per-prefix bookmarks for frequently used directories such as mod or addon folders.</p>
+  </description>
+  <launchable type="desktop-id">io.github.xrishox.SteamIdentifier.desktop</launchable>
+  <developer id="io.github.xrishox">
+    <name>Steam Identifier contributors</name>
+  </developer>
+  <url type="homepage">https://github.com/xrishox/Steam-Identifier</url>
+  <releases>
+    <release version="0.2" date="2026-04-29"/>
+    <release version="0.1" date="2026-04-29"/>
+  </releases>
+  <content_rating type="oars-1.1"/>
+</component>

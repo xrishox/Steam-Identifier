@@ -13,6 +13,7 @@ from steam_identifier.app import (
     bookmark_browse_start_path,
     folder_picker_command,
     picker_debug_message,
+    prefix_matches_filters,
 )
 from steam_identifier.scanner import PrefixEntry
 
@@ -39,6 +40,18 @@ class SorterCallbackTests(unittest.TestCase):
         gutter = 120
 
         self.assertGreaterEqual(DEFAULT_WINDOW_WIDTH, fixed_width + estimated_flexible_width + gutter)
+
+    def test_bookmarked_filter_requires_bookmarks(self) -> None:
+        obj = PrefixObject(_entry("123", "Game"))
+
+        self.assertTrue(prefix_matches_filters(obj, "", True, True))
+        self.assertFalse(prefix_matches_filters(obj, "", True, False))
+
+    def test_bookmarked_filter_combines_with_search(self) -> None:
+        obj = PrefixObject(_entry("123", "Game"))
+
+        self.assertTrue(prefix_matches_filters(obj, "game", True, True))
+        self.assertFalse(prefix_matches_filters(obj, "missing", True, True))
 
     def test_bookmark_browse_starts_at_drive_c_when_entry_path_is_missing(self) -> None:
         from tempfile import TemporaryDirectory
@@ -128,6 +141,17 @@ class SorterCallbackTests(unittest.TestCase):
             ["kdialog", "--title", "Choose Bookmark Folder", "--getexistingdirectory", "file:///tmp/prefix/pfx/drive_c"],
         )
         self.assertEqual(command.cwd, Path("/tmp/prefix/pfx/drive_c"))
+
+    def test_flatpak_folder_picker_uses_internal_browser(self) -> None:
+        from unittest.mock import patch
+
+        with patch.dict("os.environ", {"FLATPAK_ID": "io.github.xrishox.SteamIdentifier", "XDG_CURRENT_DESKTOP": "KDE"}), patch(
+            "steam_identifier.app.shutil.which",
+            return_value="/usr/bin/flatpak-spawn",
+        ):
+            command = folder_picker_command(Path("/tmp/prefix/pfx/drive_c"))
+
+        self.assertIsNone(command)
 
     def test_picker_debug_message_includes_command_and_start_path(self) -> None:
         from tempfile import TemporaryDirectory

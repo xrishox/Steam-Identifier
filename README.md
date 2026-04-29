@@ -26,6 +26,17 @@ python3 steam_identifier.py --compatdata /path/to/steam-library/steamapps/compat
 
 The tool is read-only. It does not rename or modify Steam folders.
 
+## Flatpak
+
+Build and install locally:
+
+```bash
+flatpak-builder --user --install --force-clean build-dir packaging/flatpak/io.github.xrishox.SteamIdentifier.yml
+flatpak run io.github.xrishox.SteamIdentifier
+```
+
+The Flatpak uses read-only host filesystem access so it can discover native Steam, Flatpak Steam, Snap Steam, and Steam libraries on mounted drives. Bookmarks are written only to the app's sandbox config.
+
 Detected roots include:
 
 - `~/.local/share/Steam`

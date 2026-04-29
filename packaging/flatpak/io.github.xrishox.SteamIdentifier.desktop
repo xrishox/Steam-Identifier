@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Steam Identifier
+Comment=Identify Steam Proton compatdata prefixes
+Exec=steam-identifier
+Type=Application
+Icon=io.github.xrishox.SteamIdentifier
+Categories=Utility;FileTools;
+StartupNotify=true

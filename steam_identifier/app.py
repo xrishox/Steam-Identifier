@@ -25,7 +25,7 @@ FIXED_COLUMN_WIDTHS = {
     "source": 120,
     "proton": 130,
     "modified": 150,
-    "bookmarks": 130,
+    "bookmarks": 150,
     "open": 96,
 }
 
@@ -69,6 +69,7 @@ class SteamIdentifierWindow(Gtk.ApplicationWindow):
         self.entries: list[PrefixEntry] = []
         self.store = Gio.ListStore(item_type=PrefixObject)
         self.filter_text = ""
+        self.bookmarked_only = False
         self.installations: list[SteamInstallation] = []
         self.selected_steam_root: Path | None = Path(args.steam_root).expanduser() if args.steam_root else None
         self.bookmarks = BookmarkStore()
@@ -98,6 +99,11 @@ class SteamIdentifierWindow(Gtk.ApplicationWindow):
         self._load_source_dropdown()
         self.source_dropdown.connect("notify::selected", self._on_source_changed)
         toolbar.append(self.source_dropdown)
+
+        self.bookmarked_only_button = Gtk.ToggleButton(label="Bookmarked")
+        self.bookmarked_only_button.set_tooltip_text("Show prefixes with bookmarks only")
+        self.bookmarked_only_button.connect("toggled", self._on_bookmarked_only_toggled)
+        toolbar.append(self.bookmarked_only_button)
 
         scan_button = Gtk.Button(label="Scan")
         scan_button.connect("clicked", lambda *_: self.scan())
@@ -215,6 +221,7 @@ class SteamIdentifierWindow(Gtk.ApplicationWindow):
         button.set_margin_bottom(4)
         button.set_margin_start(8)
         button.set_margin_end(8)
+        button.set_hexpand(True)
         item.set_child(button)
 
     def _bind_bookmark_button(self, _factory: Gtk.SignalListItemFactory, item: Gtk.ListItem) -> None:
@@ -301,6 +308,10 @@ class SteamIdentifierWindow(Gtk.ApplicationWindow):
         self.filter_text = search.get_text().lower()
         self.filter.changed(Gtk.FilterChange.DIFFERENT)
 
+    def _on_bookmarked_only_toggled(self, button: Gtk.ToggleButton) -> None:
+        self.bookmarked_only = button.get_active()
+        self.filter.changed(Gtk.FilterChange.DIFFERENT)
+
     def _on_source_changed(self, dropdown: Gtk.DropDown, _param: GObject.ParamSpec) -> None:
         if self.args.steam_root or self.args.compatdata or not self.installations:
             return
@@ -309,12 +320,12 @@ class SteamIdentifierWindow(Gtk.ApplicationWindow):
         self.scan()
 
     def _filter_row(self, obj: PrefixObject) -> bool:
-        if not self.filter_text:
-            return True
-        haystack = " ".join(
-            [obj.prefix_id, obj.name, obj.source, obj.library, obj.proton, obj.compatdata_path]
-        ).lower()
-        return self.filter_text in haystack
+        return prefix_matches_filters(
+            obj,
+            self.filter_text,
+            self.bookmarked_only,
+            bool(self.bookmarks.list(obj.prefix_id)),
+        )
 
     def _on_open_clicked(self, _button: Gtk.Button, obj: PrefixObject) -> None:
         drive_c = Path(obj.drive_c_path)
@@ -338,6 +349,11 @@ class SteamIdentifierWindow(Gtk.ApplicationWindow):
 
 
 def open_path(path: Path, report: Callable[[str], None]) -> None:
+    try:
+        Gio.AppInfo.launch_default_for_uri(path.resolve().as_uri())
+        return
+    except GLib.Error:
+        pass
     for command in (["gio", "open", str(path)], ["xdg-open", str(path)]):
         try:
             subprocess.Popen(command)
@@ -345,6 +361,17 @@ def open_path(path: Path, report: Callable[[str], None]) -> None:
         except OSError:
             continue
     report(f"Could not find gio or xdg-open to open {path}")
+
+
+def prefix_matches_filters(obj: PrefixObject, filter_text: str, bookmarked_only: bool, has_bookmarks: bool) -> bool:
+    if bookmarked_only and not has_bookmarks:
+        return False
+    if not filter_text:
+        return True
+    haystack = " ".join(
+        [obj.prefix_id, obj.name, obj.source, obj.library, obj.proton, obj.compatdata_path]
+    ).lower()
+    return filter_text in haystack
 
 
 class BookmarkWindow(Gtk.Window):
@@ -477,6 +504,12 @@ class BookmarkWindow(Gtk.Window):
             self.compatdata_path,
         )
 
+        if os.environ.get("FLATPAK_ID"):
+            if self.parent_window.args.debug_picker:
+                print(f"Picker debug: using internal Flatpak folder picker; start={start_path}; exists={start_path.exists()}", flush=True)
+            PrefixFolderChooserWindow(self, start_path, self._set_bookmark_path).present()
+            return
+
         external_picker = folder_picker_command(start_path)
         if self.parent_window.args.debug_picker:
             message = picker_debug_message(start_path, external_picker)
@@ -495,6 +528,9 @@ class BookmarkWindow(Gtk.Window):
         dialog.set_current_folder(Gio.File.new_for_path(str(start_path)))
         dialog.connect("response", self._browse_finished)
         dialog.show()
+
+    def _set_bookmark_path(self, path: Path) -> None:
+        self.path_entry.set_text(str(path))
 
     def _external_browse_worker(self, picker: PickerCommand) -> None:
         try:
@@ -533,6 +569,120 @@ class BookmarkWindow(Gtk.Window):
         dialog.destroy()
 
 
+class PrefixFolderChooserWindow(Gtk.Window):
+    def __init__(self, parent: BookmarkWindow, start_path: Path, on_selected: Callable[[Path], None]):
+        super().__init__(title="Choose Bookmark Folder", transient_for=parent, modal=True)
+        self.set_default_size(820, 540)
+        self.on_selected = on_selected
+        self.current_path = start_path
+        self.row_paths: dict[Gtk.ListBoxRow, Path] = {}
+
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        root.set_margin_top(12)
+        root.set_margin_bottom(12)
+        root.set_margin_start(12)
+        root.set_margin_end(12)
+        self.set_child(root)
+
+        controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        root.append(controls)
+
+        up = Gtk.Button(label="Up")
+        up.connect("clicked", self._on_up_clicked)
+        controls.append(up)
+
+        self.path_entry = Gtk.Entry()
+        self.path_entry.set_hexpand(True)
+        self.path_entry.connect("activate", self._on_path_activated)
+        controls.append(self.path_entry)
+
+        go = Gtk.Button(label="Go")
+        go.connect("clicked", self._on_go_clicked)
+        controls.append(go)
+
+        self.message = Gtk.Label(xalign=0)
+        self.message.add_css_class("dim-label")
+        root.append(self.message)
+
+        self.listbox = Gtk.ListBox()
+        self.listbox.set_activate_on_single_click(False)
+        self.listbox.connect("row-activated", self._on_row_activated)
+
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_child(self.listbox)
+        scroller.set_vexpand(True)
+        scroller.set_hexpand(True)
+        root.append(scroller)
+
+        buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        root.append(buttons)
+
+        choose = Gtk.Button(label="Choose This Folder")
+        choose.connect("clicked", self._on_choose_clicked)
+        buttons.append(choose)
+
+        cancel = Gtk.Button(label="Cancel")
+        cancel.connect("clicked", lambda *_: self.close())
+        buttons.append(cancel)
+
+        self._load_path(start_path)
+
+    def _load_path(self, path: Path) -> None:
+        path = path.expanduser()
+        if not path.exists() or not path.is_dir():
+            self.message.set_text(f"Folder does not exist: {path}")
+            return
+
+        self.current_path = path
+        self.path_entry.set_text(str(path))
+        self.message.set_text("")
+        while child := self.listbox.get_first_child():
+            self.listbox.remove(child)
+        self.row_paths.clear()
+
+        try:
+            folders = sorted((child for child in path.iterdir() if child.is_dir()), key=lambda child: child.name.casefold())
+        except OSError as exc:
+            self.message.set_text(str(exc))
+            return
+
+        if not folders:
+            self.listbox.append(Gtk.Label(label="No folders here.", xalign=0))
+            return
+
+        for folder in folders:
+            row = Gtk.ListBoxRow()
+            label = Gtk.Label(label=folder.name, xalign=0)
+            label.set_margin_top(8)
+            label.set_margin_bottom(8)
+            label.set_margin_start(8)
+            label.set_margin_end(8)
+            label.set_ellipsize(3)
+            row.set_child(label)
+            self.row_paths[row] = folder
+            self.listbox.append(row)
+
+    def _on_up_clicked(self, _button: Gtk.Button) -> None:
+        parent = self.current_path.parent
+        if parent != self.current_path:
+            self._load_path(parent)
+
+    def _on_path_activated(self, _entry: Gtk.Entry) -> None:
+        self._load_path(Path(self.path_entry.get_text()))
+
+    def _on_go_clicked(self, _button: Gtk.Button) -> None:
+        self._load_path(Path(self.path_entry.get_text()))
+
+    def _on_row_activated(self, _listbox: Gtk.ListBox, row: Gtk.ListBoxRow) -> None:
+        folder = self.row_paths.get(row)
+        if folder:
+            self._load_path(folder)
+
+    def _on_choose_clicked(self, _button: Gtk.Button) -> None:
+        self.on_selected(self.current_path)
+        self.close()
+
+
 def bookmark_browse_start_path(path_text: str, drive_c_path: Path, compatdata_path: Path) -> Path:
     start_path = Path(path_text).expanduser()
     if start_path.exists():
@@ -543,6 +693,8 @@ def bookmark_browse_start_path(path_text: str, drive_c_path: Path, compatdata_pa
 
 
 def folder_picker_command(start_path: Path) -> PickerCommand | None:
+    if os.environ.get("FLATPAK_ID"):
+        return None
     start_path = start_path.resolve()
     desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
     if "kde" in desktop and shutil.which("kdialog"):
@@ -574,7 +726,7 @@ def picker_debug_message(start_path: Path, picker: PickerCommand | None) -> str:
 
 class SteamIdentifierApp(Gtk.Application):
     def __init__(self, args: argparse.Namespace):
-        super().__init__(application_id="dev.local.SteamIdentifier")
+        super().__init__(application_id="io.github.xrishox.SteamIdentifier")
         self.args = args
 
     def do_activate(self) -> None:
