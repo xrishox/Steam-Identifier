@@ -30,6 +30,24 @@ class SteamInstallation:
     root: Path
 
 
+@dataclass(frozen=True)
+class LibraryAccessIssue:
+    path: Path
+    steam_root: Path
+
+
+@dataclass(frozen=True)
+class LibraryDiscovery:
+    accessible: list[Path]
+    inaccessible: list[LibraryAccessIssue]
+
+
+@dataclass(frozen=True)
+class ScanResult:
+    entries: list[PrefixEntry]
+    inaccessible_libraries: list[LibraryAccessIssue]
+
+
 def default_steam_root() -> Path:
     return Path.home() / ".local/share/Steam"
 
@@ -65,11 +83,27 @@ def discover_steam_roots() -> list[Path]:
 
 
 def discover_library_paths(steam_root: Path | None = None) -> list[Path]:
+    return discover_library_access(steam_root).accessible
+
+
+def discover_library_access(
+    steam_root: Path | None = None,
+    granted_libraries: dict[Path, Path] | None = None,
+) -> LibraryDiscovery:
     roots = [steam_root.expanduser()] if steam_root else discover_steam_roots()
-    paths: list[Path] = []
+    grants = {_path_key(original): granted.expanduser() for original, granted in (granted_libraries or {}).items()}
+    accessible: list[Path] = []
+    inaccessible: list[LibraryAccessIssue] = []
     for root in roots:
-        paths.extend(_discover_library_paths_for_root(root))
-    return _dedupe_existing(paths)
+        for library in _discover_library_paths_for_root(root):
+            grant = grants.get(_path_key(library))
+            if _library_accessible(library):
+                accessible.append(library)
+            elif grant and _library_accessible(grant):
+                accessible.append(grant)
+            else:
+                inaccessible.append(LibraryAccessIssue(library, root))
+    return LibraryDiscovery(_dedupe_accessible(accessible), _dedupe_issues(inaccessible))
 
 
 def _discover_library_paths_for_root(root: Path) -> list[Path]:
@@ -92,8 +126,17 @@ def scan_prefixes(
     steam_root: Path | None = None,
     compatdata_path: Path | None = None,
 ) -> list[PrefixEntry]:
+    return scan_prefixes_with_access(steam_root, compatdata_path).entries
+
+
+def scan_prefixes_with_access(
+    steam_root: Path | None = None,
+    compatdata_path: Path | None = None,
+    granted_libraries: dict[Path, Path] | None = None,
+) -> ScanResult:
     roots = [steam_root.expanduser()] if steam_root else discover_steam_roots()
-    libraries = [compatdata_path.parent.parent] if compatdata_path else discover_library_paths(steam_root)
+    discovery = LibraryDiscovery([compatdata_path.parent.parent], []) if compatdata_path else discover_library_access(steam_root, granted_libraries)
+    libraries = discovery.accessible
     manifest_names = _load_appmanifest_names(libraries)
     shortcut_names = _load_shortcut_names(roots)
 
@@ -126,7 +169,7 @@ def scan_prefixes(
                     resolved=resolved,
                 )
             )
-    return entries
+    return ScanResult(entries, discovery.inaccessible)
 
 
 def lookup_unresolved_online(entries: list[PrefixEntry]) -> list[PrefixEntry]:
@@ -223,12 +266,19 @@ def _read_first_line(path: Path) -> str:
         return ""
 
 
-def _dedupe_existing(paths: list[Path]) -> list[Path]:
+def _library_accessible(path: Path) -> bool:
+    try:
+        return (path.expanduser() / "steamapps").is_dir()
+    except OSError:
+        return False
+
+
+def _dedupe_accessible(paths: list[Path]) -> list[Path]:
     seen: set[Path] = set()
     result: list[Path] = []
     for path in paths:
         expanded = path.expanduser()
-        if not expanded.exists():
+        if not _library_accessible(expanded):
             continue
         key = expanded.resolve()
         if key in seen:
@@ -236,6 +286,22 @@ def _dedupe_existing(paths: list[Path]) -> list[Path]:
         seen.add(key)
         result.append(expanded)
     return result
+
+
+def _dedupe_issues(issues: list[LibraryAccessIssue]) -> list[LibraryAccessIssue]:
+    seen: set[str] = set()
+    result: list[LibraryAccessIssue] = []
+    for issue in issues:
+        key = _path_key(issue.path)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(issue)
+    return result
+
+
+def _path_key(path: Path) -> str:
+    return str(path.expanduser())
 
 
 def _natural_key(value: str) -> tuple[int, int | str]:

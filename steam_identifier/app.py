@@ -15,7 +15,16 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Gio, GLib, GObject, Gtk  # noqa: E402
 
 from .bookmarks import Bookmark, BookmarkStore, resolve_bookmark_path
-from .scanner import PrefixEntry, SteamInstallation, discover_steam_installations, lookup_unresolved_online, scan_prefixes
+from .library_grants import LibraryGrantStore
+from .scanner import (
+    LibraryAccessIssue,
+    PrefixEntry,
+    ScanResult,
+    SteamInstallation,
+    discover_steam_installations,
+    lookup_unresolved_online,
+    scan_prefixes_with_access,
+)
 
 
 DEFAULT_WINDOW_WIDTH = 1440
@@ -71,8 +80,13 @@ class SteamIdentifierWindow(Gtk.ApplicationWindow):
         self.filter_text = ""
         self.bookmarked_only = False
         self.installations: list[SteamInstallation] = []
+        self.inaccessible_libraries: list[LibraryAccessIssue] = []
+        self.library_access_window: LibraryAccessWindow | None = None
+        self.active_library_dialog: Gtk.FileDialog | None = None
+        self.active_library_issue: LibraryAccessIssue | None = None
         self.selected_steam_root: Path | None = Path(args.steam_root).expanduser() if args.steam_root else None
         self.bookmarks = BookmarkStore()
+        self.library_grants = LibraryGrantStore()
 
         self._build_ui()
         self.scan()
@@ -104,6 +118,12 @@ class SteamIdentifierWindow(Gtk.ApplicationWindow):
         self.bookmarked_only_button.set_tooltip_text("Show prefixes with bookmarks only")
         self.bookmarked_only_button.connect("toggled", self._on_bookmarked_only_toggled)
         toolbar.append(self.bookmarked_only_button)
+
+        self.grant_button = Gtk.Button(label="Grant")
+        self.grant_button.set_sensitive(False)
+        self.grant_button.set_tooltip_text("Grant access to Steam libraries on other drives")
+        self.grant_button.connect("clicked", self._on_grant_clicked)
+        toolbar.append(self.grant_button)
 
         scan_button = Gtk.Button(label="Scan")
         scan_button.connect("clicked", lambda *_: self.scan())
@@ -245,23 +265,27 @@ class SteamIdentifierWindow(Gtk.ApplicationWindow):
 
     def _scan_worker(self) -> None:
         try:
-            entries = scan_prefixes(
+            result = scan_prefixes_with_access(
                 steam_root=self.selected_steam_root,
                 compatdata_path=Path(self.args.compatdata).expanduser() if self.args.compatdata else None,
+                granted_libraries=self.library_grants.mapping(),
             )
-            GLib.idle_add(self._scan_finished, entries, None)
+            GLib.idle_add(self._scan_finished, result, None)
         except Exception as exc:
-            GLib.idle_add(self._scan_finished, [], str(exc))
+            GLib.idle_add(self._scan_finished, ScanResult([], []), str(exc))
 
-    def _scan_finished(self, entries: list[PrefixEntry], error: str | None) -> bool:
+    def _scan_finished(self, result: ScanResult, error: str | None) -> bool:
         if error:
             self.status.set_text(f"Scan failed: {error}")
             return GLib.SOURCE_REMOVE
+        entries = result.entries
+        self.inaccessible_libraries = result.inaccessible_libraries
         self.entries = entries
         self._load_entries(entries)
         unresolved = [entry for entry in entries if not entry.resolved and entry.prefix_id.isdigit() and entry.prefix_id != "0"]
-        self.status.set_text(self._status_text(entries))
-        if unresolved and not self.args.no_online:
+        self._update_grant_button()
+        self.status.set_text(self._status_text(entries, self.inaccessible_libraries))
+        if unresolved and not self.args.no_online and not self.inaccessible_libraries:
             self._prompt_online_lookup(len(unresolved))
         return GLib.SOURCE_REMOVE
 
@@ -296,13 +320,16 @@ class SteamIdentifierWindow(Gtk.ApplicationWindow):
     def _online_finished(self, entries: list[PrefixEntry]) -> bool:
         self.entries = entries
         self._load_entries(entries)
-        self.status.set_text(self._status_text(entries))
+        self.status.set_text(self._status_text(entries, self.inaccessible_libraries))
         return GLib.SOURCE_REMOVE
 
-    def _status_text(self, entries: list[PrefixEntry]) -> str:
+    def _status_text(self, entries: list[PrefixEntry], inaccessible_libraries: list[LibraryAccessIssue]) -> str:
         resolved = sum(1 for entry in entries if entry.resolved)
         unresolved = len(entries) - resolved
-        return f"{len(entries)} prefixes, {resolved} resolved, {unresolved} unresolved"
+        text = f"{len(entries)} prefixes, {resolved} resolved, {unresolved} unresolved"
+        if inaccessible_libraries:
+            text += f", {len(inaccessible_libraries)} library path(s) need access"
+        return text
 
     def _on_search_changed(self, search: Gtk.SearchEntry) -> None:
         self.filter_text = search.get_text().lower()
@@ -311,6 +338,10 @@ class SteamIdentifierWindow(Gtk.ApplicationWindow):
     def _on_bookmarked_only_toggled(self, button: Gtk.ToggleButton) -> None:
         self.bookmarked_only = button.get_active()
         self.filter.changed(Gtk.FilterChange.DIFFERENT)
+
+    def _on_grant_clicked(self, _button: Gtk.Button) -> None:
+        if self.inaccessible_libraries:
+            self.show_library_access_window(self.inaccessible_libraries)
 
     def _on_source_changed(self, dropdown: Gtk.DropDown, _param: GObject.ParamSpec) -> None:
         if self.args.steam_root or self.args.compatdata or not self.installations:
@@ -339,6 +370,62 @@ class SteamIdentifierWindow(Gtk.ApplicationWindow):
 
     def refresh_bookmark_buttons(self) -> None:
         self._load_entries(self.entries)
+
+    def grant_library_access(self, issue: LibraryAccessIssue, selected_path: Path, selected_uri: str) -> str | None:
+        if not (selected_path / "steamapps").is_dir():
+            return f"Select the Steam library folder that contains steamapps: {issue.path}"
+        self.library_grants.add(issue.path, selected_path, selected_uri)
+        self.scan()
+        return None
+
+    def _update_grant_button(self) -> None:
+        count = len(self.inaccessible_libraries)
+        self.grant_button.set_sensitive(bool(count))
+        self.grant_button.set_label(f"Grant ({count})" if count else "Grant")
+
+    def show_library_access_window(self, issues: list[LibraryAccessIssue]) -> None:
+        if self.library_access_window and self.library_access_window.is_visible():
+            self.library_access_window.present()
+            return
+        self.library_access_window = LibraryAccessWindow(self, issues)
+        self.library_access_window.connect("destroy", self._library_access_window_destroyed)
+        self.library_access_window.present()
+
+    def _library_access_window_destroyed(self, _window: Gtk.Window) -> None:
+        self.library_access_window = None
+
+    def start_library_grant(self, issue: LibraryAccessIssue) -> None:
+        if self.library_access_window:
+            self.library_access_window.close()
+        GLib.idle_add(self._show_library_grant_dialog, issue)
+
+    def _show_library_grant_dialog(self, issue: LibraryAccessIssue) -> bool:
+        dialog = Gtk.FileDialog(title="Grant Steam Library Access", accept_label="Grant")
+        self.active_library_dialog = dialog
+        self.active_library_issue = issue
+        dialog.select_folder(self, None, self._library_grant_dialog_finished)
+        return GLib.SOURCE_REMOVE
+
+    def _library_grant_dialog_finished(self, dialog: Gtk.FileDialog, result: Gio.AsyncResult) -> None:
+        issue = self.active_library_issue
+        try:
+            if not issue:
+                return
+            try:
+                folder = dialog.select_folder_finish(result)
+            except GLib.Error:
+                return
+            path = Path(folder.get_path()) if folder and folder.get_path() else None
+            uri = folder.get_uri() if folder else ""
+            if not path:
+                self.status.set_text("Could not read selected folder path.")
+                return
+            error = self.grant_library_access(issue, path, uri)
+            if error:
+                self.status.set_text(error)
+        finally:
+            self.active_library_dialog = None
+            self.active_library_issue = None
 
     def _compare(self, left: PrefixObject, right: PrefixObject, attr: str) -> int:
         a = getattr(left, attr)
@@ -372,6 +459,74 @@ def prefix_matches_filters(obj: PrefixObject, filter_text: str, bookmarked_only:
         [obj.prefix_id, obj.name, obj.source, obj.library, obj.proton, obj.compatdata_path]
     ).lower()
     return filter_text in haystack
+
+
+class LibraryAccessWindow(Gtk.Window):
+    def __init__(self, parent: SteamIdentifierWindow, issues: list[LibraryAccessIssue]):
+        super().__init__(title="Grant Library Access", transient_for=parent, modal=False)
+        self.set_default_size(760, 320)
+        self.set_destroy_with_parent(True)
+        self.parent_window = parent
+        self.issues = issues
+
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        root.set_margin_top(12)
+        root.set_margin_bottom(12)
+        root.set_margin_start(12)
+        root.set_margin_end(12)
+        self.set_child(root)
+
+        self.message = Gtk.Label(xalign=0)
+        self.message.add_css_class("dim-label")
+        self.message.set_text("Grant access by selecting the Steam library folder that contains steamapps.")
+        root.append(self.message)
+
+        listbox = Gtk.ListBox()
+        listbox.set_selection_mode(Gtk.SelectionMode.NONE)
+        for issue in issues:
+            listbox.append(self._issue_row(issue))
+
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_child(listbox)
+        scroller.set_vexpand(True)
+        scroller.set_hexpand(True)
+        root.append(scroller)
+
+        close = Gtk.Button(label="Close")
+        close.connect("clicked", lambda *_: self.close())
+        root.append(close)
+
+    def _issue_row(self, issue: LibraryAccessIssue) -> Gtk.ListBoxRow:
+        row = Gtk.ListBoxRow()
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        box.set_margin_top(8)
+        box.set_margin_bottom(8)
+        box.set_margin_start(8)
+        box.set_margin_end(8)
+
+        label = Gtk.Label(label=str(issue.path), xalign=0)
+        label.set_ellipsize(3)
+        label.set_hexpand(True)
+        label.set_tooltip_text(str(issue.path))
+        box.append(label)
+
+        copy_button = Gtk.Button(label="Copy Path")
+        copy_button.connect("clicked", self._on_copy_path_clicked, issue)
+        box.append(copy_button)
+
+        button = Gtk.Button(label="Grant")
+        button.connect("clicked", self._on_grant_issue_clicked, issue)
+        box.append(button)
+
+        row.set_child(box)
+        return row
+
+    def _on_grant_issue_clicked(self, _button: Gtk.Button, issue: LibraryAccessIssue) -> None:
+        self.parent_window.start_library_grant(issue)
+
+    def _on_copy_path_clicked(self, _button: Gtk.Button, issue: LibraryAccessIssue) -> None:
+        self.get_clipboard().set(str(issue.path))
+        self.message.set_text("Path copied. Paste it into the folder picker location field if needed.")
 
 
 class BookmarkWindow(Gtk.Window):

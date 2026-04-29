@@ -10,9 +10,13 @@ finish-args:
   - --socket=fallback-x11
   - --device=dri
   - --share=network
-  # Steam libraries can live in native, Flatpak, Snap, home, or mounted disk paths.
-  # Access is read-only; bookmarks are stored in this app's sandbox config.
-  - --filesystem=host:ro
+  # Default Steam locations are read-only. Extra library drives are granted
+  # explicitly by the user through the portal folder picker.
+  - --filesystem=~/.local/share/Steam:ro
+  - --filesystem=~/.steam/steam:ro
+  - --filesystem=~/.var/app/com.valvesoftware.Steam/.local/share/Steam:ro
+  - --filesystem=~/snap/steam/common/.local/share/Steam:ro
+  - --filesystem=~/snap/steam/common/.steam/steam:ro
 
 modules:
   - name: steam-identifier

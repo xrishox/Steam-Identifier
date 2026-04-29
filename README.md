@@ -35,7 +35,7 @@ flatpak-builder --user --install --force-clean build-dir packaging/flatpak/io.gi
 flatpak run io.github.xrishox.SteamIdentifier
 ```
 
-The Flatpak uses read-only host filesystem access so it can discover native Steam, Flatpak Steam, Snap Steam, and Steam libraries on mounted drives. Bookmarks are written only to the app's sandbox config.
+The Flatpak has read-only access to normal native, Flatpak, and Snap Steam locations. If Steam's `libraryfolders.vdf` points to a library on another drive that the sandbox cannot read, the app shows a `Grant` action. Use it to select that Steam library folder through the portal; the grant is stored at `${XDG_CONFIG_HOME:-~/.config}/steam-identifier/libraries.json` and reused on future scans.
 
 Detected roots include:
 

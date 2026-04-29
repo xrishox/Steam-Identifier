@@ -6,7 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from steam_identifier.scanner import discover_steam_installations, discover_steam_roots, scan_prefixes
+from steam_identifier.scanner import discover_steam_installations, discover_steam_roots, scan_prefixes, scan_prefixes_with_access
 
 
 class ScannerTests(unittest.TestCase):
@@ -97,6 +97,62 @@ class ScannerTests(unittest.TestCase):
 
         self.assertEqual(len(installations), 1)
         self.assertEqual(installations[0].kind, "native")
+
+    def test_reports_inaccessible_library_from_libraryfolders(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            home = tmp_path / "home"
+            old_home = os.environ.get("HOME")
+            os.environ["HOME"] = str(home)
+            try:
+                steam = home / ".local/share/Steam"
+                missing = tmp_path / "missing-library"
+                (steam / "steamapps").mkdir(parents=True)
+                (steam / "steamapps/libraryfolders.vdf").write_text(
+                    f'"libraryfolders" {{ "0" {{ "path" "{steam}" }} "1" {{ "path" "{missing}" }} }}',
+                    encoding="utf-8",
+                )
+
+                result = scan_prefixes_with_access()
+            finally:
+                if old_home is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = old_home
+
+        self.assertEqual([issue.path for issue in result.inaccessible_libraries], [missing])
+
+    def test_granted_library_path_scans_inaccessible_original(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            home = tmp_path / "home"
+            old_home = os.environ.get("HOME")
+            os.environ["HOME"] = str(home)
+            try:
+                steam = home / ".local/share/Steam"
+                original = tmp_path / "mounted-library"
+                grant = tmp_path / "portal-doc/SteamLibrary"
+                (steam / "steamapps").mkdir(parents=True)
+                (grant / "steamapps/compatdata/123456/pfx/drive_c").mkdir(parents=True)
+                (grant / "steamapps/appmanifest_123456.acf").write_text(
+                    '"AppState" { "appid" "123456" "name" "Granted Game" }',
+                    encoding="utf-8",
+                )
+                (steam / "steamapps/libraryfolders.vdf").write_text(
+                    f'"libraryfolders" {{ "0" {{ "path" "{steam}" }} "1" {{ "path" "{original}" }} }}',
+                    encoding="utf-8",
+                )
+
+                result = scan_prefixes_with_access(granted_libraries={original: grant})
+            finally:
+                if old_home is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = old_home
+
+        self.assertEqual(result.inaccessible_libraries, [])
+        self.assertEqual(result.entries[0].name, "Granted Game")
+        self.assertEqual(result.entries[0].library_path, grant)
 
 
 def _write_shortcuts(path: Path) -> None:
